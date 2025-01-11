@@ -1,145 +1,76 @@
 import discord
 from discord.ext import commands
+import yt_dlp
 import os
-import asyncio
-import subprocess
-import json
 
-# Discord bot token
-DISCORD_TOKEN = "YOUR_DISCORD_BOT_TOKEN"
-
-# Intents and bot setup
+# Set up intents and bot
 intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
+intents.guilds = True
+intents.voice_states = True
+intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Global variables for queue and current song
-song_queue = asyncio.Queue()
-current_song = None
+# Function to play audio
+async def play_audio(ctx, voice_channel, url):
+    # Ensure cookies.txt exists
+    cookies_file = "cookies.txt"
+    if not os.path.exists(cookies_file):
+        await ctx.send("Error: cookies.txt not found. Please ensure it is in the same folder as the bot script.")
+        return
 
+    # Connect to the voice channel
+    vc = await voice_channel.connect()
 
-async def download_audio_stream(youtube_url):
-    """Downloads the audio stream from a YouTube URL using yt-dlp."""
-    try:
-        # Get video metadata
-        result = subprocess.run(
-            ["yt-dlp", "--print-json", "--no-warnings", youtube_url],
-            capture_output=True,
-            text=True,
-        )
+    # Set yt-dlp options
+    ydl_opts = {
+        "format": "bestaudio",
+        "cookies": cookies_file,
+        "quiet": True,
+        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}],
+    }
 
-        if result.returncode != 0 or not result.stdout.strip():
-            print(f"Error: yt-dlp failed to fetch metadata for URL: {youtube_url}")
-            return None, None
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            info = ydl.extract_info(url, download=False)
+            stream_url = info["url"]
+            source = discord.FFmpegPCMAudio(stream_url)
+            vc.play(source, after=lambda e: print(f"Player error: {e}") if e else None)
+            await ctx.send(f"Now playing: {info['title']}")
+        except Exception as e:
+            await ctx.send(f"Error playing audio: {str(e)}")
 
-        video_info = json.loads(result.stdout)
-        title = video_info.get("title", "Unknown Title")
-
-        # Download the audio stream
-        output_file = f"audio_temp_{hash(youtube_url)}.mp3"
-        subprocess.run(
-            [
-                "yt-dlp",
-                "-x",
-                "--audio-format",
-                "mp3",
-                "-o",
-                output_file,
-                youtube_url,
-            ],
-            check=True,
-        )
-        print(f"Download completed: {title}")
-        return output_file, title
-
-    except Exception as e:
-        print(f"Error downloading audio stream: {e}")
-        return None, None
-
-
-async def play_next(ctx):
-    """Plays the next song in the queue."""
-    global current_song
-
-    if not song_queue.empty():
-        youtube_url = await song_queue.get()
-        audio_file, title = await download_audio_stream(youtube_url)
-
-        if audio_file:
-            current_song = audio_file
-            ffmpeg_options = {
-                "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-                "options": "-vn",
-            }
-            audio_source = discord.FFmpegPCMAudio(audio_file, **ffmpeg_options)
-            ctx.voice_client.play(
-                audio_source,
-                after=lambda e: asyncio.run_coroutine_threadsafe(play_next(ctx), bot.loop),
-            )
-            await ctx.send(f"Now playing: {title}")
-        else:
-            await ctx.send("Failed to play the next song.")
-    else:
-        current_song = None
-        await ctx.send("The queue is empty!")
-
-
-@bot.command()
+# Command to join a voice channel
+@bot.command(name="join")
 async def join(ctx):
-    """Command to join the voice channel."""
     if ctx.author.voice:
-        channel = ctx.author.voice.channel
-        await channel.connect()
-        await ctx.send(f"Joined {channel}")
+        voice_channel = ctx.author.voice.channel
+        await voice_channel.connect()
+        await ctx.send(f"Joined {voice_channel.name}")
     else:
-        await ctx.send("You need to be in a voice channel to use this command!")
+        await ctx.send("You must be in a voice channel to use this command!")
 
+# Command to play music
+@bot.command(name="play")
+async def play(ctx, url: str):
+    if ctx.author.voice:
+        await play_audio(ctx, ctx.author.voice.channel, url)
+    else:
+        await ctx.send("You must be in a voice channel to use this command!")
 
-@bot.command()
+# Command to leave the voice channel
+@bot.command(name="leave")
 async def leave(ctx):
-    """Command to leave the voice channel."""
     if ctx.voice_client:
         await ctx.voice_client.disconnect()
         await ctx.send("Disconnected from the voice channel.")
     else:
-        await ctx.send("I'm not in a voice channel!")
+        await ctx.send("I am not in a voice channel!")
 
-
-@bot.command()
-async def play(ctx, youtube_url):
-    """Command to queue and play a YouTube URL."""
-    global current_song
-
-    await song_queue.put(youtube_url)
-    await ctx.send(f"Added to queue: {youtube_url}")
-
-    if not ctx.voice_client.is_playing() and current_song is None:
-        await play_next(ctx)
-
-
-@bot.command()
-async def skip(ctx):
-    """Command to skip the current song."""
-    if ctx.voice_client and ctx.voice_client.is_playing():
-        ctx.voice_client.stop()
-        await ctx.send("Skipping the current song.")
-    else:
-        await ctx.send("No song is currently playing.")
-
-
-@bot.command()
-async def queue(ctx):
-    """Command to show the current queue."""
-    if song_queue.empty():
-        await ctx.send("The queue is empty!")
-    else:
-        queue_list = list(song_queue._queue)  # Access the queue
-        message = "Current Queue:\n" + "\n".join(
-            [f"{i + 1}. {url}" for i, url in enumerate(queue_list)]
-        )
-        await ctx.send(message)
-
+# Bot event for startup
+@bot.event
+async def on_ready():
+    print(f"Bot logged in as {bot.user}")
 
 # Run the bot
-bot.run(DISCORD_TOKEN)
